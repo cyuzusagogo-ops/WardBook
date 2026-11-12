@@ -1,0 +1,31 @@
+{
+  "name": "wardbook",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Multi-hospital ward rounds system for clinical teams: patient files, daily notes, tasks and handover summaries, with access rules enforced in PostgreSQL.",
+  "type": "module",
+  "main": "src/server.js",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js",
+    "db:setup": "node scripts/setup-db.js",
+    "db:migrate": "node scripts/migrate.js",
+    "create-hospital": "node scripts/create-hospital.js",
+    "create-admin": "node scripts/create-admin.js",
+    "seed:demo": "node scripts/seed-demo.js",
+    "test": "node --test --test-concurrency=1 test/*.test.js"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^1.8.0",
+    "bcryptjs": "^3.0.3",
+    "dotenv": "^18.0.10",
+    "express": "^5.3.0",
+    "helmet": "^8.3.0",
+    "otpauth": "^9.6.0",
+    "pg": "^8.23.1",
+    "qrcode": "^1.5.4"
+  }
+}
