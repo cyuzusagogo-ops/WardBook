@@ -55,8 +55,10 @@ export async function seedDemo(ownerUrl, { password, domain = 'demo.wardbook.tes
         [hospital, p.no, p.name, p.sex, p.age, p.dept, p.ward, p.bed, p.status, p.admitted, p.allergies, p.clinical, by])).rows[0].id;
       ids.patients[key] = id;
       for (const v of p.vitals || []) {
-        await db.query(`INSERT INTO vitals (hospital_id, patient_id, recorded_at, sbp, dbp, hr, rr, temp, spo2, gcs, weight_kg, recorded_by)
-          VALUES ($1,$2,now() - make_interval(hours => $3),$4,$5,$6,$7,$8,$9,$10,$11,$12)`, [hospital, id, ...v, by]);
+        const [hours, sbp, dbp, hr, rr, temp, spo2, gcs, weight, onOxygen = null, avpu = null] = v;
+        await db.query(`INSERT INTO vitals (hospital_id, patient_id, recorded_at, sbp, dbp, hr, rr, temp, spo2, gcs, weight_kg, on_oxygen, avpu, recorded_by)
+          VALUES ($1,$2,now() - make_interval(hours => $3),$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`,
+          [hospital, id, hours, sbp, dbp, hr, rr, temp, spo2, gcs, weight, onOxygen, avpu, by]);
       }
       for (const t of p.tasks || []) await db.query('INSERT INTO tasks (hospital_id, patient_id, text, created_by) VALUES ($1,$2,$3,$4)', [hospital, id, t, by]);
       for (const n of p.notes || []) {
@@ -74,7 +76,7 @@ export async function seedDemo(ownerUrl, { password, domain = 'demo.wardbook.tes
         exam: 'Bronchial breathing and crackles right lower zone. Dry mucous membranes.', labs: 'WBC 16.4; CRP 182; Urea 9.1; Creatinine 128; Glucose 14.2',
         imaging: 'Chest X-ray: right lower lobe consolidation', dx: 'Community-acquired pneumonia, CURB-65 score 3', ddx: 'Pulmonary embolism\nLung abscess',
         problems: 'Pneumonia\nHyperglycaemia\nRisk of acute kidney injury', plan: 'Ceftriaxone and azithromycin (penicillin allergy noted)\nIV fluids, fluid balance chart\nInsulin sliding scale, hold metformin\nRepeat urea and electrolytes tomorrow', sp: {} },
-      vitals: [[2, 104, 62, 108, 24, 38.6, 92, 15, 78], [14, 110, 68, 112, 26, 38.9, 91, 15, null]],
+      vitals: [[2, 104, 62, 108, 24, 38.6, 92, 15, 78, true, 'A'], [14, 110, 68, 112, 26, 38.9, 91, 15, null, true, 'A']],
       tasks: ['Chase blood cultures', 'Repeat urea and electrolytes in the morning'],
       notes: [{ date: daysAgo(1), s: 'Slept poorly, still breathless.', o: 'T 38.9, SpO2 91% on 2 L.', a: 'Not yet improving on day 1 of antibiotics.', p: 'Continue antibiotics, oxygen to target 94-98%, review cultures.' }],
     });
@@ -84,7 +86,7 @@ export async function seedDemo(ownerUrl, { password, domain = 'demo.wardbook.tes
       clinical: { complaint: 'Right iliac fossa pain for 1 day', pmh: 'None', exam: 'Soft abdomen, mild port-site tenderness.', labs: 'Hb 12.6; WBC 11.0',
         dx: 'Acute appendicitis, after laparoscopic appendicectomy', plan: 'Oral diet as tolerated\nOral analgesia\nMobilise\nDischarge tomorrow if tolerating diet',
         sp: { procedure: 'Laparoscopic appendicectomy', opDate: daysAgo(1), opFindings: 'Inflamed, non-perforated appendix' } },
-      vitals: [[3, 118, 74, 86, 16, 37.4, 99, 15, 61]],
+      vitals: [[3, 118, 74, 86, 16, 37.4, 99, 15, 61, false, 'A']],
     });
     await addPatient('er', hA, {
       no: 'DEMO-3015', name: 'Eric M. (demo)', sex: 'Male', age: '35y', dept: 'ER', ward: 'Resus', bed: 'R1', status: 'critical',
@@ -92,7 +94,7 @@ export async function seedDemo(ownerUrl, { password, domain = 'demo.wardbook.tes
       clinical: { complaint: 'Road traffic accident, motorcycle rider', exam: 'GCS 13, tender left upper quadrant, abrasions to left arm.',
         dx: 'Blunt abdominal trauma, suspected splenic injury', plan: 'Two large-bore IV lines, crossmatch 4 units\nFAST scan\nSurgical review now',
         sp: { triage: 'Red', arrival: '02:40', erTx: '1 L Ringer lactate, IV paracetamol' } },
-      vitals: [[1, 92, 58, 124, 24, 36.4, 96, 13, null]],
+      vitals: [[1, 92, 58, 124, 24, 36.4, 96, 13, null, false, 'C']],
       tasks: ['Surgical review', 'FAST scan result'],
     });
     await addPatient('peds', hA, {
@@ -100,7 +102,7 @@ export async function seedDemo(ownerUrl, { password, domain = 'demo.wardbook.tes
       admitted: daysAgo(1), allergies: 'No known drug allergies',
       clinical: { complaint: 'Cough and fast breathing for 2 days', exam: 'Subcostal recession, bilateral wheeze.', dx: 'Bronchiolitis',
         plan: 'Nasal oxygen to keep SpO2 above 92%\nNasogastric feeds if poor intake', sp: { birthHx: 'Term, vaginal delivery, 3.1 kg', immun: 'Up to date for age' } },
-      vitals: [[2, null, null, 156, 58, 37.9, 91, null, 7.8]],
+      vitals: [[2, null, null, 156, 58, 37.9, 91, null, 7.8, false, 'A']],
     });
     await addPatient('obgyn', hA, {
       no: 'DEMO-5004', name: 'Diane M. (demo)', sex: 'Female', age: '31y', dept: 'OBGYN', ward: 'Maternity', bed: 'L7', status: 'watch',
@@ -108,7 +110,7 @@ export async function seedDemo(ownerUrl, { password, domain = 'demo.wardbook.tes
       clinical: { complaint: 'Headache and leg swelling', labs: 'Urine protein 2+; Platelets 168; ALT 32', dx: 'Pre-eclampsia without severe features',
         plan: 'BP every 4 hours\nPre-eclampsia bloods daily\nFetal monitoring\nDiscuss timing of delivery with consultant',
         sp: { gravida: '2', para: '1', lmp: daysAgo(255), fetal: 'FHR 140, active movements, cephalic' } },
-      vitals: [[1, 152, 98, 88, 18, 36.8, 98, 15, null]],
+      vitals: [[1, 152, 98, 88, 18, 36.8, 98, 15, null, false, 'A']],
     });
     await addPatient('district', hB, {
       no: 'DEMO-9001', name: 'Samuel H. (demo)', sex: 'Male', age: '61y', dept: 'IM', ward: 'Medical', bed: 'B4', status: 'stable',

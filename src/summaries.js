@@ -1,5 +1,8 @@
 import Anthropic from '@anthropic-ai/sdk';
 import { DEPARTMENTS } from './permissions.js';
+import '../public/clinical.js';
+
+const WB = globalThis.WBClinical;
 
 const MODEL = process.env.ANTHROPIC_MODEL || 'claude-opus-5-5';
 let client = null;
@@ -104,11 +107,13 @@ export function caseText({ patient, vitals = [], notes = [], tasks = [] }, { dei
   const vs = vitals.slice(0, 6).map(v => {
     const parts = [v.sbp && v.dbp ? `BP ${v.sbp}/${v.dbp}` : null, v.hr && `HR ${v.hr}`, v.rr && `RR ${v.rr}`,
       v.temp && `T ${v.temp}`, v.spo2 && `SpO2 ${v.spo2}%`, v.gcs && `GCS ${v.gcs}`, v.glucose && `glucose ${v.glucose}`,
-      v.urine && `urine ${v.urine}`].filter(Boolean).join(', ');
+      v.urine && `urine ${v.urine}`, v.avpu && `ACVPU ${v.avpu}`, v.on_oxygen === true ? 'on oxygen' : v.on_oxygen === false ? 'on air' : null].filter(Boolean).join(', ');
     const when = deidentify ? `day ${dayOf(admitted, v.recorded_at) ?? '?'} ${new Date(v.recorded_at).toISOString().slice(11, 16)}` : new Date(v.recorded_at).toISOString().slice(0, 16).replace('T', ' ');
     return parts ? `- ${when}: ${parts}` : null;
   }).filter(Boolean);
   if (vs.length) L.push('Vital signs, newest first:\n' + vs.join('\n'));
+  const warn = warningLine(patient, vitals);
+  if (warn) L.push('Early warning on newest observations: ' + warn);
 
   const open = tasks.filter(t => !t.done).map(t => scrub(t.text));
   if (open.length) L.push('Pending tasks: ' + open.join('; '));
@@ -121,14 +126,13 @@ export function caseText({ patient, vitals = [], notes = [], tasks = [] }, { dei
   return L.join('\n');
 }
 
-export function oneLiner(patient) {
-  const c = patient.clinical || {};
-  const first = t => String(t || '').split('\n')[0].trim().replace(/[.;,]$/, '');
-  let s = [patient.age, patient.sex].filter(Boolean).join(' ');
-  if (c.pmh) s += ` with ${first(c.pmh)}`;
-  if (c.complaint) s += `${s ? ', ' : ''}presenting with ${first(c.complaint)}`;
-  if (c.dx) s += `. Working diagnosis: ${first(c.dx)}`;
-  return s ? s.charAt(0).toUpperCase() + s.slice(1) + '.' : '';
+export const oneLiner = p => WB.oneLiner(p);
+
+// The early warning line, e.g. "NEWS2 6 (medium risk) ...", from the newest set of observations.
+export function warningLine(patient, vitals) {
+  const a = WB.assess(patient, vitals?.[0]);
+  if (!a) return '';
+  return [a.badge, a.reasons?.length ? '(' + a.reasons.join('; ') + ')' : '', a.detail, a.action].filter(Boolean).join(' ');
 }
 
 // Used when the AI is off for the hospital or not configured: built locally, nothing leaves.
@@ -142,6 +146,8 @@ export function templateSummary(record) {
   const vline = v ? [v.sbp && v.dbp ? `BP ${v.sbp}/${v.dbp}` : null, v.hr && `HR ${v.hr}`, v.rr && `RR ${v.rr}`,
     v.temp && `T ${v.temp}`, v.spo2 && `SpO2 ${v.spo2}%`].filter(Boolean).join(', ') : '';
   L.push('EXAMINATION\n' + ([vline, c.exam].filter(Boolean).join('\n') || 'not documented'));
+  const warn = warningLine(patient, vitals);
+  if (warn) L.push('EARLY WARNING\n' + warn);
   if (c.labs || c.imaging) L.push('INVESTIGATIONS\n' + [c.labs, c.imaging].filter(Boolean).join('\n'));
   L.push('ASSESSMENT\n' + (c.dx || 'not documented') + (c.problems ? '\n' + c.problems : ''));
   const last = notes.find(n => n.kind !== 'addendum');

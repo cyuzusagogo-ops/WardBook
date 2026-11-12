@@ -96,7 +96,7 @@ test('students see only assigned patients, de-identified, and cannot change the 
   const list = (await s.get('/api/patients')).body;
   assert.deepEqual(list.map(p => p.id), [ids().patients.im]);
   assert.equal(list[0].hospital_number, null);
-  assert.ok(!list[0].name.includes('Amani'));
+  assert.equal(list[0].name, 'A.K.');
   const file = (await s.get(`/api/patients/${ids().patients.im}`)).body;
   assert.ok(!JSON.stringify(file.patient).includes('Amani'));
   assert.equal((await s.post('/api/patients', { name: 'X', department: 'IM' })).status, 403);
@@ -263,6 +263,32 @@ test('summaries: template when AI is unavailable; acceptance is recorded and fin
   assert.equal(acc.status, 200);
   assert.equal(acc.body.accepted_by, ids().users.intern.id);
   assert.equal((await intern.post(`/api/summaries/${r.body.id}/accept`)).status, 403);
+});
+
+test('vitals record oxygen and consciousness, and reject unknown consciousness values', async () => {
+  const intern = await env.as('intern');
+  const r = await intern.post(`/api/patients/${ids().patients.er}/vitals`, { sbp: 100, dbp: 60, hr: 118, rr: 22, temp: 37.1, spo2: 94, on_oxygen: true, avpu: 'V' });
+  assert.equal(r.status, 201);
+  assert.equal(r.body.on_oxygen, true);
+  assert.equal(r.body.avpu, 'V');
+  const bad = await intern.post(`/api/patients/${ids().patients.er}/vitals`, { hr: 90, avpu: 'X' });
+  assert.equal(bad.body.avpu, null);
+  const list = (await intern.get('/api/patients')).body.find(p => p.id === ids().patients.er);
+  assert.equal(list.last_vitals.avpu, null);
+});
+
+test('audit log filters by person and action, and names patients only for roles that may see them', async () => {
+  const auditor = await env.as('auditor');
+  const r = await auditor.get(`/api/audit?actor=${ids().users.nurse.id}&action=view`);
+  assert.equal(r.status, 200);
+  assert.ok(r.body.rows.length > 0);
+  assert.ok(r.body.rows.every(x => x.actor_id === ids().users.nurse.id && x.action === 'view'));
+  assert.ok(r.body.rows.some(x => x.patient_name === 'Amani K. (demo)'));
+  const adm = await env.as('admin');
+  const ar = (await adm.get('/api/audit?action=view')).body.rows;
+  assert.ok(ar.length > 0);
+  assert.ok(ar.every(x => x.patient_name === null));
+  assert.equal((await auditor.get('/api/audit?from=2026-13-01')).status, 400);
 });
 
 test('the web app is served with a strict content security policy', async () => {

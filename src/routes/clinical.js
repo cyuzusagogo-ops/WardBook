@@ -4,6 +4,9 @@ import { HttpError, clean } from '../http.js';
 import { need } from '../auth.js';
 import { DEPARTMENTS, noteKindFor } from '../permissions.js';
 import { SUMMARY_KINDS, aiConfigured, aiSummary, templateSummary, aiErrorMessage } from '../summaries.js';
+import '../../public/clinical.js';
+
+const { initials } = globalThis.WBClinical;
 
 const STATUSES = ['stable', 'improving', 'watch', 'critical', 'ready_for_discharge'];
 const CLINICAL_KEYS = ['complaint', 'hpi', 'pmh', 'psh', 'meds', 'social', 'family', 'exam', 'labs', 'imaging',
@@ -25,7 +28,6 @@ function cleanClinical(input) {
   return out;
 }
 
-const initials = name => String(name || '').split(/\s+/).filter(Boolean).map(w => w[0].toUpperCase() + '.').join('') || '—';
 
 // Students see initials only and no hospital number; the same applies when de-identified view is on.
 function present(p, member) {
@@ -84,11 +86,11 @@ export function clinicalRoutes(pool) {
       const dept = req.query.department && DEPARTMENTS[req.query.department] ? req.query.department : null;
       const rows = await tx(req, async db => (await db.query(`
         SELECT p.id, p.name, p.hospital_number, p.sex, p.age, p.department, p.ward, p.bed, p.status, p.admitted_at,
-               p.discharged_at, p.allergies, p.version, p.updated_at,
+               p.discharged_at, p.allergies, p.version, p.updated_at, p.dob,
                p.clinical->>'dx' AS dx, p.clinical->>'complaint' AS complaint, p.clinical->'sp' AS sp,
                (SELECT count(*)::int FROM tasks t WHERE t.patient_id = p.id AND NOT t.done) AS open_tasks,
                (SELECT max(n.note_date) FROM notes n WHERE n.patient_id = p.id) AS last_note,
-               (SELECT row_to_json(v) FROM (SELECT sbp, dbp, hr, rr, temp, spo2, recorded_at FROM vitals v
+               (SELECT row_to_json(v) FROM (SELECT sbp, dbp, hr, rr, temp, spo2, gcs, avpu, on_oxygen, recorded_at FROM vitals v
                   WHERE v.patient_id = p.id ORDER BY recorded_at DESC LIMIT 1) v) AS last_vitals
         FROM patients p
         WHERE (p.status = 'discharged') = $1 AND ($2::text IS NULL OR p.department = $2)
@@ -197,14 +199,16 @@ export function clinicalRoutes(pool) {
         temp: clean.num(b.temp, 25, 45, 'Temperature'), spo2: clean.num(b.spo2, 30, 100, 'SpO2'),
         gcs: clean.num(b.gcs, 3, 15, 'GCS'), weight_kg: clean.num(b.weight_kg, 0.2, 400, 'Weight'),
         glucose: clean.short(b.glucose), urine: clean.short(b.urine),
+        on_oxygen: b.on_oxygen === true || b.on_oxygen === false ? b.on_oxygen : null,
+        avpu: ['A', 'C', 'V', 'P', 'U'].includes(b.avpu) ? b.avpu : null,
       };
       if (Object.values(v).every(x => x == null)) throw new HttpError(400, 'Enter at least one vital sign.');
       const recorded = b.recorded_at ? new Date(b.recorded_at) : new Date();
       if (Number.isNaN(recorded.getTime()) || recorded > new Date(Date.now() + 5 * 60e3)) throw new HttpError(400, 'The time recorded cannot be in the future.');
       const row = await tx(req, async db => (await db.query(`
-        INSERT INTO vitals (hospital_id, patient_id, recorded_at, sbp, dbp, hr, rr, temp, spo2, gcs, weight_kg, glucose, urine, recorded_by)
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) RETURNING *`,
-        [req.ctx.hospitalId, id, recorded, v.sbp, v.dbp, v.hr, v.rr, v.temp, v.spo2, v.gcs, v.weight_kg, v.glucose, v.urine, req.ctx.userId])).rows[0]);
+        INSERT INTO vitals (hospital_id, patient_id, recorded_at, sbp, dbp, hr, rr, temp, spo2, gcs, weight_kg, glucose, urine, on_oxygen, avpu, recorded_by)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16) RETURNING *`,
+        [req.ctx.hospitalId, id, recorded, v.sbp, v.dbp, v.hr, v.rr, v.temp, v.spo2, v.gcs, v.weight_kg, v.glucose, v.urine, v.on_oxygen, v.avpu, req.ctx.userId])).rows[0]);
       res.status(201).json(row);
     } catch (e) { next(e); }
   });
@@ -349,11 +353,25 @@ export function clinicalRoutes(pool) {
     try {
       const limit = Math.min(Number(req.query.limit) || 200, 1000);
       const patient = req.query.patient ? clean.uuid(req.query.patient) : null;
+      const actor = req.query.actor ? clean.uuid(req.query.actor) : null;
+      const action = ['view', 'insert', 'update', 'delete', 'reset'].includes(req.query.action) ? req.query.action : null;
+      const from = clean.date(req.query.from);
+      const to = clean.date(req.query.to);
       const out = await tx(req, async db => {
+        // The patient name comes through the patients table, so row-level security decides who sees it:
+        // auditors and heads of department do; hospital admins (no clinical access) get an empty column.
         const rows = (await db.query(`
-          SELECT id, actor_id, action, entity, entity_id, detail, at FROM audit_log
-          WHERE ($1::uuid IS NULL OR entity_id = $1 OR detail->>'patient_id' = $1::text)
-          ORDER BY at DESC, id DESC LIMIT $2`, [patient, limit])).rows;
+          SELECT a.id, a.actor_id, a.action, a.entity, a.entity_id, a.detail, a.at,
+                 p.id AS patient_id, p.name AS patient_name, p.bed AS patient_bed
+          FROM audit_log a
+          LEFT JOIN patients p ON p.id = CASE WHEN a.entity = 'patients' THEN a.entity_id
+                                              ELSE nullif(a.detail->>'patient_id', '')::uuid END
+          WHERE ($1::uuid IS NULL OR a.entity_id = $1 OR a.detail->>'patient_id' = $1::text)
+            AND ($2::uuid IS NULL OR a.actor_id = $2)
+            AND ($3::text IS NULL OR a.action = $3)
+            AND ($4::date IS NULL OR a.at >= $4::date)
+            AND ($5::date IS NULL OR a.at < $5::date + 1)
+          ORDER BY a.at DESC, a.id DESC LIMIT $6`, [patient, actor, action, from, to, limit])).rows;
         return { rows, people: await people(db) };
       });
       res.json(out);

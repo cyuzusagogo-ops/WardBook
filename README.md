@@ -9,6 +9,9 @@ permission is enforced inside the database, not just in the screens.
   flagged and a trend table, examination, results, diagnosis, problem list, plan, tasks, care team.
   Department extras: gestational age and EDD (OBGYN), maintenance fluids from weight (Pediatrics),
   post-op day (Surgery), triage and ER course (ER).
+- **Early warning on every vital signs set:** NEWS2 for adults, age-banded ranges and WHO fast
+  breathing for children, MEOWS-style triggers for obstetric patients. Shown on the patient file
+  and the department list, with the recommended response.
 - **Daily SOAP notes** with sign-off: interns write, a resident or attending signs; signed notes
   can't change, and corrections are added as addenda.
 - **Tasks** per patient, collected on one Tasks page.
@@ -34,6 +37,23 @@ permission is enforced inside the database, not just in the screens.
 Departments can be set to "All". A person can belong to several hospitals with a different role in
 each, and only ever sees the hospital they chose at sign-in.
 
+## Early warning rules
+
+All thresholds live in one file, `public/clinical.js`, used by both the screens and the summaries.
+
+| Patients | Chart | Triggers shown |
+|---|---|---|
+| Adults 16+ (not obstetric) | NEWS2, Royal College of Physicians 2017, SpO₂ scale 1 | Score with risk band and response; any single parameter scoring 3 |
+| Under 16, or in Pediatrics | Age-banded normal ranges (APLS-style) for heart rate, respiratory rate and systolic BP; WHO fast breathing; SpO₂ below 92% at any age | Signs outside the range for the child's age |
+| Obstetrics & Gynecology | MEOWS-style (after Singh et al. 2012) | One red or two yellows |
+
+A NEWS2 score from an incomplete set is marked with `+` and lists what is missing, so it never looks
+reassuring. The vitals card shows the latest value of each sign with its own time, and greys values
+older than 6 hours.
+
+**Before go-live, your senior clinicians must check these thresholds against the charts your hospital
+uses.** The tool supports clinical judgement; it does not replace it.
+
 ## How the security works
 
 - The web server connects to PostgreSQL as `wardbook_app`, a role that owns nothing and cannot
@@ -51,7 +71,7 @@ each, and only ever sees the hospital they chose at sign-in.
 - Cookies are HttpOnly and SameSite=Strict, writes need a custom header, and the pages are served
   with a strict Content Security Policy. Nothing loads from outside the server.
 
-`npm test` runs 25 automated tests (22 of them against a real database) that try to break these rules:
+`npm test` runs 37 automated tests (24 of them against a real database, 10 on the early warning rules) that try to break these rules:
 cross-hospital access, forged hospital IDs, department limits, students, nurses, auditors,
 admins, suspension, concurrent edits, note signing, discharge rights, transfers, consults,
 audit immutability, idle timeout, code replay, lockout and de-identification.

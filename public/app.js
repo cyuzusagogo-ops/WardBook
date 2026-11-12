@@ -19,7 +19,8 @@
   const daysBetween = (a, b) => Math.floor((new Date(iso(b) + 'T00:00:00') - new Date(iso(a) + 'T00:00:00')) / 864e5);
   const hospDay = p => { if (!p.admitted_at) return null; const n = daysBetween(p.admitted_at, today()); return n >= 0 ? n + 1 : null; };
   const firstLine = t => String(t || '').split('\n')[0].trim().replace(/[.;,]$/, '');
-  const initials = n => String(n || '').split(/\s+/).filter(w => /[A-Za-z]/.test(w[0] || '')).map(w => w[0].toUpperCase() + '.').join('') || '—';
+  const WB = window.WBClinical;
+  const initials = WB.initials;
   const showName = p => (S.deid ? initials(p.name) : p.name || 'Unnamed');
   const showNo = p => (S.deid ? '' : p.hospital_number || '');
   const perms = () => S.me?.perms || {};
@@ -60,21 +61,6 @@
   // ---------------------------------------------------------------------------
   // Clinical helpers
   // ---------------------------------------------------------------------------
-  function flag(key, v, dept) {
-    if (dept === 'PEDS' || v == null || v === '') return '';
-    const n = Number(v);
-    switch (key) {
-      case 'sbp': return n < 90 || n >= 180 ? 'crit' : n >= 140 || n < 100 ? 'warn' : '';
-      case 'dbp': return n >= 120 ? 'crit' : n >= 90 ? 'warn' : '';
-      case 'hr': return n < 40 || n > 130 ? 'crit' : n < 50 || n > 100 ? 'warn' : '';
-      case 'rr': return n < 8 || n >= 25 ? 'crit' : n > 20 ? 'warn' : '';
-      case 'temp': return n >= 39 || n < 35 ? 'crit' : n >= 38 || n < 36 ? 'warn' : '';
-      case 'spo2': return n < 90 ? 'crit' : n < 94 ? 'warn' : '';
-      case 'gcs': return n <= 8 ? 'crit' : n < 15 ? 'warn' : '';
-      default: return '';
-    }
-  }
-  const worst = (...f) => (f.includes('crit') ? 'crit' : f.includes('warn') ? 'warn' : '');
   function gaFromLmp(lmp) { if (!lmp) return null; const n = daysBetween(lmp, today()); return n < 0 || n > 320 ? null : { w: Math.floor(n / 7), d: n % 7 }; }
   function edd(lmp) { const d = new Date(lmp + 'T00:00:00'); d.setDate(d.getDate() + 280); return d.toISOString().slice(0, 10); }
   function maintFluid(kg) { kg = Number(kg); if (!(kg > 0)) return null; const ml = kg <= 10 ? kg * 100 : kg <= 20 ? 1000 + (kg - 10) * 50 : 1500 + (kg - 20) * 20; return { day: Math.round(ml), hr: Math.round(ml / 24) }; }
@@ -129,7 +115,12 @@
       if (v.startsWith('p-')) { S.file = null; render(); S.file = await api('GET', '/api/patients/' + v.slice(2)); }
       if (v === 'tasks') S.tasks = await api('GET', '/api/tasks');
       if (v === 'staff') S.staff = await api('GET', '/api/admin/staff');
-      if (v === 'audit') S.audit = await api('GET', '/api/audit?limit=300' + (S.auditPatient ? '&patient=' + S.auditPatient : ''));
+      if (v === 'audit') {
+        const q = new URLSearchParams({ limit: '300' });
+        if (S.auditPatient) q.set('patient', S.auditPatient);
+        for (const [k, val] of Object.entries(S.auditFilter || {})) if (val) q.set(k, val);
+        S.audit = await api('GET', '/api/audit?' + q);
+      }
     } catch (e) {
       if (e.status === 404 && v.startsWith('p-')) S.file = { missing: true, message: e.message };
       else fail(e);
@@ -240,7 +231,14 @@
           <button data-act="logout">Sign out</button></div>` : ''}
       </div></div>
       <nav class="tabs" aria-label="Sections">${tabs.join('')}</nav>`;
+    updateTabsFade();
   }
+  function updateTabsFade() {
+    const t = $('.tabs'); if (!t) return;
+    t.classList.toggle('more', t.scrollWidth - t.clientWidth - t.scrollLeft > 4);
+  }
+  document.addEventListener('scroll', e => { if (e.target.classList?.contains('tabs')) updateTabsFade(); }, true);
+  window.addEventListener('resize', updateTabsFade);
 
   function renderMain() {
     const v = S.view;
@@ -273,7 +271,8 @@
     if (!S.showDc && act.length) {
       const tasks = act.reduce((n, p) => n + (p.open_tasks || 0), 0);
       const noNote = act.filter(p => iso(p.last_note) !== today()).length;
-      h += `<div class="stats"><span><b>${act.length}</b>patients</span><span style="color:var(--crit)"><b>${act.filter(p => p.status === 'critical').length}</b>critical</span><span style="color:var(--warn)"><b>${act.filter(p => p.status === 'watch').length}</b>on watch</span><span><b>${tasks}</b>open tasks</span><span class="muted"><b>${noNote}</b>without a note today</span></div>`;
+      const triggers = act.filter(p => WB.assess(p, p.last_vitals)?.level === 'crit').length;
+      h += `<div class="stats"><span><b>${act.length}</b>${act.length === 1 ? 'patient' : 'patients'}</span><span style="color:var(--crit)"><b>${triggers}</b>early warning ${triggers === 1 ? 'trigger' : 'triggers'}</span><span style="color:var(--crit)"><b>${act.filter(p => p.status === 'critical').length}</b>critical</span><span style="color:var(--warn)"><b>${act.filter(p => p.status === 'watch').length}</b>on watch</span><span><b>${tasks}</b>open tasks</span><span class="muted"><b>${noNote}</b>without a note today</span></div>`;
     }
     if (!list.length) {
       if (S.q) return h + `<div class="empty"><p>No patient matches “${esc(S.q)}”.</p></div>`;
@@ -283,15 +282,15 @@
     return h + `<div class="grid">${list.map(pcard).join('')}</div>`;
   }
   function pcard(p) {
-    const sc = p.status === 'discharged' ? 'var(--line)' : p.status === 'critical' ? 'var(--crit)' : p.status === 'watch' ? 'var(--warn)' : 'var(--ok)';
+    const sc = p.status === 'discharged' ? 'var(--line)' : p.status === 'critical' || WB.assess(p, p.last_vitals)?.level === 'crit' ? 'var(--crit)' : p.status === 'watch' ? 'var(--warn)' : 'var(--ok)';
     const hd = hospDay(p), lv = p.last_vitals;
-    const vf = lv ? worst(flag('sbp', lv.sbp, p.department), flag('hr', lv.hr, p.department), flag('rr', lv.rr, p.department), flag('temp', lv.temp, p.department), flag('spo2', lv.spo2, p.department)) : '';
+    const ew = WB.assess(p, lv);
     const ga = p.department === 'OBGYN' && gaFromLmp(p.sp?.lmp);
     return `<a class="pcard" href="#p-${esc(p.id)}" style="--sc:${sc}">
       <div class="r1">${p.bed ? `<span class="bed">${esc(p.bed)}</span>` : ''}<span class="pname">${esc(showName(p))}</span><span style="margin-left:auto">${statusChip(p.status)}</span></div>
       <div class="meta"><span>${esc([p.age, p.sex].filter(Boolean).join(' · '))}</span>${hd ? `<span class="mono">Day ${hd}</span>` : ''}${ga ? `<span class="mono">${ga.w}+${ga.d} wks</span>` : ''}${p.ward ? `<span>${esc(p.ward)}</span>` : ''}</div>
       <div>${p.dx ? esc(firstLine(p.dx)) : `<span class="muted">${esc(firstLine(p.complaint) || 'No diagnosis yet')}</span>`}</div>
-      <div class="meta">${p.open_tasks ? `<span style="color:var(--accent)">${p.open_tasks} task${p.open_tasks > 1 ? 's' : ''} open</span>` : '<span>No open tasks</span>'}<span>${p.last_note ? 'Last note ' + fmtDate(p.last_note) : 'No notes yet'}</span>${vf ? `<span style="color:var(--${vf});font-weight:600">${vf === 'crit' ? 'Abnormal vitals' : 'Vitals to watch'}</span>` : ''}${!noAllergy(p.allergies) ? `<span style="color:var(--crit);font-weight:600">Allergy</span>` : ''}</div></a>`;
+      <div class="meta">${p.open_tasks ? `<span style="color:var(--accent)">${p.open_tasks} task${p.open_tasks > 1 ? 's' : ''} open</span>` : '<span>No open tasks</span>'}<span>${p.last_note ? 'Last note ' + fmtDate(p.last_note) : 'No notes yet'}</span>${ew ? `<span class="ew ew-${ew.level}" title="${esc(ew.action || ew.detail || '')}">${esc(ew.badge)}</span>` : '<span>No vitals yet</span>'}${!noAllergy(p.allergies) ? `<span style="color:var(--crit);font-weight:600">Allergy</span>` : ''}</div></a>`;
   }
 
   // ---------------------------------------------------------------------------
@@ -310,9 +309,10 @@
     const hd = hospDay(p), v0 = F.vitals[0];
     const pod = p.department === 'SURGERY' && sp.opDate ? daysBetween(sp.opDate, today()) : null;
     const ga = p.department === 'OBGYN' && gaFromLmp(sp.lmp);
-    const weight = F.vitals.find(v => v.weight_kg)?.weight_kg;
+    const latest = WB.latestBySign(F.vitals);
+    const weight = latest.weight_kg?.value;
     const back = visibleDepts().includes('MINE') ? 'dept-MINE' : 'dept-' + p.department;
-    const one = [p.age, p.sex].filter(Boolean).join(' ') + (c.pmh ? ` with ${firstLine(c.pmh)}` : '') + (c.complaint ? `, presenting with ${firstLine(c.complaint)}` : '') + (hd ? `. Hospital day ${hd}` : '') + (c.dx ? `. Working diagnosis: ${firstLine(c.dx)}.` : '');
+    const one = WB.oneLiner(p, today());
 
     let h = `<a class="btn ghost no-print" href="#${back}" style="margin-bottom:10px">← ${esc(visibleDepts().includes('MINE') ? 'My patients' : deptName(p.department))}</a>
     <div class="banner" style="--tc:var(--${p.department})">
@@ -333,19 +333,33 @@
         ${p.discharged_at ? `<span><b>Discharged</b> ${fmtDate(p.discharged_at)}</span>` : ''}
       </div>
       <div class="allergy ${noAllergy(p.allergies) ? 'none' : ''}">${!String(p.allergies || '').trim() ? 'Allergies not documented' : noAllergy(p.allergies) ? 'No known drug allergies' : 'Allergies: ' + esc(p.allergies)}</div>
-      ${one.trim() ? `<div style="max-width:80ch">${esc(one.charAt(0).toUpperCase() + one.slice(1))}</div>` : ''}
+      ${one ? `<div style="max-width:80ch">${esc(one)}</div>` : ''}
     </div>`;
 
     // vitals
     const vitBody = v0 ? (() => {
-      const items = [['BP', v0.sbp && v0.dbp ? `${v0.sbp}/${v0.dbp}` : '', worst(flag('sbp', v0.sbp, p.department), flag('dbp', v0.dbp, p.department)), 'mmHg'],
-        ['HR', v0.hr, flag('hr', v0.hr, p.department), '/min'], ['RR', v0.rr, flag('rr', v0.rr, p.department), '/min'],
-        ['Temp', v0.temp, flag('temp', v0.temp, p.department), '°C'], ['SpO₂', v0.spo2, flag('spo2', v0.spo2, p.department), '%'],
-        ['GCS', v0.gcs, flag('gcs', v0.gcs, p.department), '/15'], ['Glucose', v0.glucose, '', ''], ['Urine', v0.urine, '', '']].filter(x => x[1] != null && x[1] !== '');
-      return `<div class="vitals">${items.map(([l, v, f, u]) => `<div class="vt ${f}"><div class="lbl">${l}</div><div class="v">${esc(v)}</div><div class="muted" style="font-size:11px">${u}</div></div>`).join('')}</div>
-        <div class="muted" style="font-size:12.5px">${fmtTime(v0.recorded_at)} by ${esc(nameOf(v0.recorded_by))}. ${p.department === 'PEDS' ? 'Paediatric ranges depend on age, so values are not flagged.' : 'Flags use adult ranges.'}</div>
-        ${F.vitals.length > 1 ? `<details><summary class="muted">Trend (${F.vitals.length} sets)</summary><div class="scroll-x"><table class="t"><thead><tr><th>Time</th><th>BP</th><th>HR</th><th>RR</th><th>T</th><th>SpO₂</th><th>GCS</th></tr></thead><tbody>
-          ${F.vitals.slice(0, 20).map(v => `<tr><td>${fmtTime(v.recorded_at)}</td><td class="n ${worst(flag('sbp', v.sbp, p.department), flag('dbp', v.dbp, p.department))}">${v.sbp ? `${v.sbp}/${v.dbp ?? ''}` : ''}</td><td class="n ${flag('hr', v.hr, p.department)}">${v.hr ?? ''}</td><td class="n ${flag('rr', v.rr, p.department)}">${v.rr ?? ''}</td><td class="n ${flag('temp', v.temp, p.department)}">${v.temp ?? ''}</td><td class="n ${flag('spo2', v.spo2, p.department)}">${v.spo2 ?? ''}</td><td class="n ${flag('gcs', v.gcs, p.department)}">${v.gcs ?? ''}</td></tr>`).join('')}
+      const ew = WB.assess(p, v0), fl = ew?.flags || {};
+      const ago = at => { const h = (Date.now() - new Date(at)) / 36e5; return h < 1 ? Math.max(1, Math.round(h * 60)) + ' min ago' : h < 48 ? Math.round(h) + ' h ago' : fmtDate(at); };
+      const AVPU = { A: 'Alert', C: 'Confused', V: 'Voice', P: 'Pain', U: 'Unresp.' };
+      const tile = (label, key, show, unit, fk = key) => {
+        const L = latest[key]; if (!L) return '';
+        const fromNewest = L.at === v0.recorded_at, old = Date.now() - new Date(L.at) > 6 * 36e5;
+        return `<div class="vt ${fromNewest ? fl[fk] || '' : ''} ${old ? 'old' : ''}" title="${esc(fmtTime(L.at))}"><div class="lbl">${label}</div><div class="v">${esc(show(L))}</div><div class="u">${fromNewest ? unit : esc(ago(L.at))}</div></div>`;
+      };
+      const tiles = [
+        tile('BP', 'sbp', L => `${L.value}/${L.dbpWith ?? '?'}`, 'mmHg', fl.sbp ? 'sbp' : 'dbp'),
+        tile('HR', 'hr', L => L.value, '/min'), tile('RR', 'rr', L => L.value, '/min'), tile('Temp', 'temp', L => L.value, '°C'),
+        tile('SpO₂', 'spo2', L => L.value, '%'), tile('O₂', 'on_oxygen', L => (L.value ? 'Oxygen' : 'Air'), '', 'o2'),
+        latest.avpu ? tile('ACVPU', 'avpu', L => AVPU[L.value] || L.value, '', 'gcs') : tile('GCS', 'gcs', L => L.value, '/15'),
+        tile('Glucose', 'glucose', L => L.value, ''), tile('Urine', 'urine', L => L.value, ''),
+      ].join('');
+      const ewBox = ew ? `<div class="ewbox ew-${ew.level}"><div class="row"><b>${esc(ew.badge)}</b>${ew.reasons?.length ? `<span class="muted" style="font-size:13px">${esc(ew.reasons.join(' · '))}</span>` : ''}</div>
+          ${ew.action ? `<div><b>${esc(ew.action)}</b></div>` : ''}${ew.detail ? `<div class="muted" style="font-size:13px">${esc(ew.detail)}</div>` : ''}</div>` : '';
+      const rowFlags = v => WB.assess(p, v)?.flags || {};
+      return `${ewBox}<div class="vitals">${tiles}</div>
+        <div class="muted" style="font-size:12.5px">Newest set ${fmtTime(v0.recorded_at)} by ${esc(nameOf(v0.recorded_by))}. Values not in that set show how old they are; values over 6 hours old are greyed.</div>
+        ${F.vitals.length > 1 ? `<details><summary class="muted">Trend (${F.vitals.length} sets)</summary><div class="scroll-x"><table class="t"><thead><tr><th>Time</th><th>Score</th><th>BP</th><th>HR</th><th>RR</th><th>T</th><th>SpO₂</th><th>O₂</th><th>ACVPU / GCS</th></tr></thead><tbody>
+          ${F.vitals.slice(0, 20).map(v => { const f = rowFlags(v), a = WB.assess(p, v); return `<tr><td>${fmtTime(v.recorded_at)}</td><td class="${a?.level === 'ok' ? '' : a?.level}">${esc(a?.scheme === 'NEWS2' ? a.badge.replace('NEWS2 ', '') : a?.level === 'ok' ? 'OK' : a?.level === 'crit' ? 'Trigger' : 'Watch')}</td><td class="n ${f.sbp || f.dbp || ''}">${v.sbp ? `${v.sbp}/${v.dbp ?? ''}` : ''}</td><td class="n ${f.hr || ''}">${v.hr ?? ''}</td><td class="n ${f.rr || ''}">${v.rr ?? ''}</td><td class="n ${f.temp || ''}">${v.temp ?? ''}</td><td class="n ${f.spo2 || ''}">${v.spo2 ?? ''}</td><td>${v.on_oxygen === true ? 'O₂' : v.on_oxygen === false ? 'Air' : ''}</td><td class="n ${f.gcs || ''}">${v.avpu || v.gcs || ''}</td></tr>`; }).join('')}
           </tbody></table></div></details>` : ''}`;
     })() : `<div class="none">No vital signs recorded yet</div>`;
 
@@ -365,7 +379,7 @@
     h += `<div class="facts">
       ${card('Presenting complaint & history', (c.complaint ? `<div style="font-weight:600">${esc(c.complaint)}</div>` : '') + txt(c.hpi, c.complaint ? '' : 'Not documented'), { w: 'w2', edit: 'hx' })}
       ${card('Vital signs' + (P.recordVitals ? '' : ''), vitBody + (P.recordVitals && p.status !== 'discharged' ? `<div><button class="btn sm no-print" data-act="vitals">+ Record vitals</button></div>` : ''), { w: 'w2' })}
-      ${card('Past history & medications', kv([['PMH', c.pmh], ['Medications', c.meds], ...(p.department === 'IM' ? [] : [['Surgical', c.psh], ['Social', c.social]])]), { edit: 'hx' })}
+      ${card('PMH & medications', kv([['PMH', c.pmh], ['Medications', c.meds], ...(p.department === 'IM' ? [] : [['Surgical', c.psh], ['Social', c.social]])]), { edit: 'hx' })}
       ${card('Examination', txt(c.exam), { edit: 'exam' })}
       ${card('Investigations', (labs.length ? `<div class="labs">${labs.map(l => `<span class="lab">${esc(l)}</span>`).join('')}</div>` : `<div class="none">No results recorded</div>`) + (c.imaging ? `<div class="lbl">Imaging / other</div>${txt(c.imaging)}` : ''), { w: 'w2', edit: 'inv' })}
       ${card('Diagnosis', (c.dx ? `<div style="font-weight:600">${esc(c.dx)}</div>` : `<div class="none">No working diagnosis yet</div>`) + (c.ddx ? `<div class="lbl">Differentials</div>${txt(c.ddx)}` : ''), { edit: 'dx' })}
@@ -464,7 +478,7 @@
     const cur = S.me.current;
     const roles = S.meta.roles;
     let h = `<div class="head"><div><div class="lbl">${esc(cur.name)}</div><h2>Staff and access</h2></div><div class="acts"><button class="btn primary" data-act="add-staff">+ Add staff</button></div></div>
-      <div class="panel-form" style="margin-bottom:18px"><div class="row"><b class="grow">AI summaries</b>${statusChip(cur.aiEnabled ? 'stable' : 'discharged').replace(/>(Stable|Discharged)</, `>${cur.aiEnabled ? 'On' : 'Off'}<`)}
+      <div class="panel-form" style="margin-bottom:18px"><div class="row"><b class="grow">AI summaries</b>${!cur.aiEnabled ? '<span class="chip s-discharged">Off</span>' : cur.aiConfigured ? '<span class="chip s-stable">On</span>' : '<span class="chip s-watch">Allowed, but no AI key on the server</span>'}
         <button class="btn sm" data-act="toggle-ai">${cur.aiEnabled ? 'Turn off' : 'Turn on'}</button></div>
         <p class="muted" style="margin:0;font-size:13.5px">When on, clinicians can send a de-identified copy of a patient record to the AI service to draft a summary. Turn it on only after your data protection officer has approved the provider and where it processes data. ${cur.aiConfigured ? '' : '<b>The server has no AI key set, so summaries stay template-only either way.</b>'}</p></div>
       <div class="scroll-x"><table class="t"><thead><tr><th>Name</th><th>Role</th><th>Departments</th><th>Access</th><th>Two-step</th><th>Last active</th><th></th></tr></thead><tbody>
@@ -477,21 +491,38 @@
     return h;
   }
 
+  const FIELD_WORDS = {
+    signed_at: 'signed', signed_by: null, clinical: 'clinical details', status: 'status', bed: 'bed', ward: 'ward', department: 'department',
+    allergies: 'allergies', done: 'done', done_at: null, done_by: null, accepted_at: 'accepted', accepted_by: null, name: 'name',
+    hospital_number: 'hospital number', age: 'age', sex: 'sex', dob: 'date of birth', admitted_at: 'admission date', discharged_at: 'discharge date',
+    s: 'note text', o: 'note text', a: 'note text', p: 'note text', note_date: 'note date', role: 'role', departments: 'departments',
+    active: 'access on/off', valid_until: 'end date', ai_enabled: 'AI setting',
+  };
+  const fieldWords = list => [...new Set((list || []).map(f => (f in FIELD_WORDS ? FIELD_WORDS[f] : f)).filter(Boolean))].join(', ');
   function viewAudit() {
     if (!S.audit) return `<p class="muted">Loading audit log…</p>`;
-    const ppl = S.audit.people || {};
+    const ppl = S.audit.people || {}, fF = S.auditFilter || {};
     const label = r => {
       const what = { patients: 'patient file', vitals: 'vital signs', notes: 'note', tasks: 'task', transfers: 'transfer', summaries: 'summary', assignments: 'care team', memberships: 'staff access', hospitals: 'hospital settings', account: 'account' }[r.entity] || r.entity;
+      if (r.entity === 'notes' && r.detail?.changed?.includes('signed_at')) return 'Signed note';
+      if (r.entity === 'summaries' && r.detail?.changed?.includes('accepted_at')) return 'Accepted summary';
+      if (r.entity === 'tasks' && r.detail?.changed?.includes('done')) return 'Ticked task';
       const verb = { view: 'Opened', insert: 'Added', update: 'Changed', delete: 'Removed', reset: 'Reset' }[r.action] || r.action;
       return `${verb} ${what}`;
     };
-    let h = `<div class="head"><div><div class="lbl">Append-only: nobody can edit or delete entries</div><h2>Audit log</h2></div>
-      ${S.auditPatient ? `<div class="acts"><button class="btn sm" data-act="audit-all">Show all activity</button></div>` : ''}</div>
+    const people = Object.entries(ppl).sort((a, b) => a[1].name.localeCompare(b[1].name));
+    let h = `<div class="head"><div><div class="lbl">Append-only: nobody can edit or delete entries</div><h2>Audit log</h2></div></div>
+      <form class="panel-form no-print" id="f-audit" style="margin-bottom:16px"><div class="fg">
+        ${fld('actor', 'Person', fF.actor || '', { type: 'select', opts: [['', 'Everyone'], ...people.map(([id, x]) => [id, x.name])] })}
+        ${fld('action', 'Action', fF.action || '', { type: 'select', opts: [['', 'All actions'], ['view', 'Opened a file'], ['insert', 'Added'], ['update', 'Changed'], ['reset', 'Account reset']] })}
+        ${fld('from', 'From', fF.from || '', { type: 'date' })}${fld('to', 'To', fF.to || '', { type: 'date' })}
+      </div><div class="row"><button class="btn primary sm">Apply</button>${fF.actor || fF.action || fF.from || fF.to || S.auditPatient ? `<button type="button" class="btn sm" data-act="audit-all">Clear filters</button>` : ''}
+        <span class="muted" style="font-size:13px">${S.audit.rows.length === 300 ? 'Showing the newest 300 entries.' : `${S.audit.rows.length} ${S.audit.rows.length === 1 ? 'entry' : 'entries'}.`}</span></div></form>
       ${S.auditPatient ? `<div class="notice info">Showing activity for one patient file.</div>` : ''}
-      <div class="scroll-x"><table class="t"><thead><tr><th>When</th><th>Who</th><th>What</th><th>Details</th><th>Record</th></tr></thead><tbody>
+      <div class="scroll-x"><table class="t"><thead><tr><th>When</th><th>Who</th><th>What</th><th>Patient</th><th>Details</th></tr></thead><tbody>
       ${S.audit.rows.map(r => `<tr><td class="n">${fmtTime(r.at)}</td><td>${esc(r.actor_id ? ppl[r.actor_id]?.name || 'Former staff' : 'System')}</td><td>${esc(label(r))}</td>
-        <td class="muted">${esc(r.detail?.changed ? 'Fields: ' + r.detail.changed.join(', ') : '')}</td>
-        <td>${r.entity === 'patients' && r.entity_id ? `<a href="#p-${r.entity_id}">Open</a>` : r.detail?.patient_id ? `<a href="#p-${esc(r.detail.patient_id)}">Patient</a>` : ''}</td></tr>`).join('')}
+        <td>${r.patient_name ? `<a href="#p-${esc(r.patient_id)}">${esc(S.deid ? initials(r.patient_name) : r.patient_name)}</a>${r.patient_bed ? ` <span class="muted">· ${esc(r.patient_bed)}</span>` : ''}` : r.patient_id || r.detail?.patient_id ? '<span class="muted">Not visible to your role</span>' : ''}</td>
+        <td class="muted">${esc(r.detail?.changed ? fieldWords(r.detail.changed) : '')}</td></tr>`).join('') || `<tr><td colspan="5" class="muted">No entries match these filters.</td></tr>`}
       </tbody></table></div>`;
     return h;
   }
@@ -606,15 +637,17 @@
     const p = S.file.patient;
     openModal('Record vital signs', `<form id="vform"><div class="fg">
       ${fld('bp', 'Blood pressure', '', { ph: '120/80' })}${fld('hr', 'Heart rate', '', { type: 'number' })}${fld('rr', 'Respiratory rate', '', { type: 'number' })}${fld('temp', 'Temperature °C', '', { type: 'number' })}
-      ${fld('spo2', 'SpO₂ %', '', { type: 'number' })}${fld('gcs', 'GCS', '', { type: 'number' })}${fld('weight_kg', 'Weight kg', '', { type: 'number' })}${fld('glucose', 'Glucose', '', { ph: 'e.g. 7.2 mmol/L' })}
-      ${fld('urine', 'Urine output', '', { cls: 's2', ph: 'e.g. 0.6 mL/kg/h' })}${fld('recorded_at', 'Time taken', new Date(Date.now() - new Date().getTimezoneOffset() * 60e3).toISOString().slice(0, 16), { type: 'datetime-local', cls: 's2' })}
-    </div></form>`, `<button class="btn" data-close>Cancel</button><button class="btn primary" id="saveV">Save</button>`, { narrow: false });
+      ${fld('spo2', 'SpO₂ %', '', { type: 'number' })}${fld('on_oxygen', 'Breathing', '', { type: 'select', opts: [['', 'Not recorded'], ['air', 'Room air'], ['oxygen', 'On oxygen']] })}${fld('avpu', 'Consciousness (ACVPU)', '', { type: 'select', opts: [['', 'Not recorded'], ['A', 'Alert'], ['C', 'New confusion'], ['V', 'Responds to voice'], ['P', 'Responds to pain'], ['U', 'Unresponsive']] })}${fld('gcs', 'GCS', '', { type: 'number' })}
+      ${fld('weight_kg', 'Weight kg', '', { type: 'number' })}${fld('glucose', 'Glucose', '', { ph: 'e.g. 7.2 mmol/L' })}
+      ${fld('urine', 'Urine output', '', { cls: 's2', ph: 'e.g. 0.6 mL/kg/h' })}${fld('recorded_at', 'Time taken', new Date(Date.now() - new Date().getTimezoneOffset() * 60e3).toISOString().slice(0, 16), { type: 'datetime-local', cls: 's4' })}
+    </div><p class="muted" style="margin:10px 0 0;font-size:13px">${p.department === 'OBGYN' ? 'Obstetric patients are checked against MEOWS-style triggers.' : WB.ageYears(p.age, p.dob) < 16 || p.department === 'PEDS' ? 'Children are checked against normal ranges for their age.' : 'A full set (RR, SpO₂, air or oxygen, BP, HR, consciousness, temperature) gives a complete NEWS2 score.'}</p></form>`, `<button class="btn" data-close>Cancel</button><button class="btn primary" id="saveV">Save</button>`, { narrow: false });
     $('#f_temp').step = '0.1'; $('#f_weight_kg').step = '0.1';
     $('#saveV').onclick = async () => {
       const d = formData('#vform');
       const bp = String(d.bp || '').match(/^(\d{2,3})\s*\/\s*(\d{2,3})$/);
       if (d.bp && !bp) return modalError('Write blood pressure as systolic/diastolic, for example 120/80.');
       const body = { hr: d.hr, rr: d.rr, temp: d.temp, spo2: d.spo2, gcs: d.gcs, weight_kg: d.weight_kg, glucose: d.glucose, urine: d.urine,
+        on_oxygen: d.on_oxygen === 'oxygen' ? true : d.on_oxygen === 'air' ? false : undefined, avpu: d.avpu || undefined,
         sbp: bp?.[1], dbp: bp?.[2], recorded_at: d.recorded_at ? new Date(d.recorded_at).toISOString() : undefined };
       try { await api('POST', `/api/patients/${p.id}/vitals`, body); closeModal(); toast('Vital signs saved'); await reloadFile(); } catch (e) { modalError(e.message); }
     };
@@ -806,7 +839,7 @@
           await api('POST', `/api/patients/${p.id}/readmit`, { version: p.version }); toast('Readmitted'); S.listLoaded = false; await reloadFile();
         });
       case 'patient-audit': S.auditPatient = p.id; return go('audit');
-      case 'audit-all': S.auditPatient = null; return loadView();
+      case 'audit-all': S.auditPatient = null; S.auditFilter = {}; return loadView();
       case 'add-staff': return openAddStaff();
       case 'toggle-ai': {
         const on = !S.me.current.aiEnabled;
@@ -853,6 +886,8 @@
       } else if (f.id === 'f-code') {
         await api('POST', '/api/auth/two-step/verify', { code: f.code.value });
         S.setup = null; await refreshMe(); route();
+      } else if (f.id === 'f-audit') {
+        const d = formData('#f-audit'); S.auditFilter = d; S.audit = null; render(); await loadView();
       } else if (f.dataset.form === 'task') {
         const text = f.t.value.trim(); if (!text) return;
         await api('POST', `/api/patients/${S.file.patient.id}/tasks`, { text });
